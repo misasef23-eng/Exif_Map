@@ -210,6 +210,27 @@
 
   <!-- Floating Collapsible Photo Manager Drawer (Left) -->
   <aside id="photoDrawer" class="fixed top-[74px] left-3.5 bottom-3.5 w-[calc(100vw-28px)] sm:w-[360px] z-[480] glass-panel rounded-2xl flex flex-col overflow-hidden transition-transform duration-300 ease-out">
+    <!-- Rust Local Server: Scan Folder & OS-Native OCR -->
+    <div id="serverPanel" class="p-3 border-b border-slate-200/70 bg-emerald-50/50">
+      <p class="text-[11px] font-semibold text-emerald-900 mb-1.5 flex items-center gap-1">
+        <i data-lucide="cpu" class="w-3.5 h-3.5 text-emerald-600"></i> Quét thư mục &amp; OCR hệ điều hành (Rust)
+      </p>
+      <div class="flex items-center gap-1.5">
+        <input id="serverFolderInput" type="text" placeholder="/Users/ten/Pictures/Travel" class="flex-1 min-w-0 px-2.5 py-1.5 text-xs bg-white border border-emerald-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30" />
+        <button id="btnServerScan" type="button" class="px-2.5 py-1.5 text-xs font-semibold rounded-xl bg-slate-900 hover:bg-slate-800 text-white shrink-0 transition">Quét</button>
+        <button id="btnServerOcr" type="button" class="px-2.5 py-1.5 text-xs font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white shrink-0 transition">OCR</button>
+      </div>
+      <div id="ocrProgressWrap" class="hidden mt-2">
+        <div class="flex items-center justify-between text-[10px] text-emerald-900 mb-1">
+          <span id="ocrProgressLabel">Đang nhận diện chữ...</span>
+          <span id="ocrProgressCount">0/0</span>
+        </div>
+        <div class="w-full h-1.5 bg-emerald-100 rounded-full overflow-hidden">
+          <div id="ocrProgressBar" class="h-full bg-emerald-600 transition-all duration-300" style="width: 0%"></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Drag & Drop Zone -->
     <div class="p-3 border-b border-slate-200/70">
       <div id="dropZone" class="border-2 border-dashed border-slate-300/90 bg-white/70 rounded-xl p-3 text-center transition cursor-pointer hover:border-emerald-500 hover:bg-emerald-50/70">
@@ -246,7 +267,7 @@
       <div class="flex items-center gap-1.5">
         <div class="relative flex-1">
           <i data-lucide="search" class="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"></i>
-          <input id="searchInput" type="text" placeholder="Tìm ảnh, máy ảnh, địa điểm..." class="w-full pl-8 pr-2.5 py-1.5 text-xs bg-white/85 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
+          <input id="searchInput" type="text" placeholder="Tìm tên ảnh, máy ảnh, chữ OCR trong ảnh..." class="w-full pl-8 pr-2.5 py-1.5 text-xs bg-white/85 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500" />
         </div>
         <div class="flex items-center bg-slate-200/70 p-0.5 rounded-xl shrink-0">
           <button id="btnViewGrid" type="button" title="Dạng lưới" class="p-1.5 rounded-lg bg-white text-slate-800 shadow-xs">
@@ -263,6 +284,7 @@
         <button data-gps="with_gps" type="button" class="gps-pill px-2.5 py-1 text-[11px] font-medium rounded-lg bg-white/80 text-slate-700 hover:bg-white">Có GPS</button>
         <button data-gps="no_gps" type="button" class="gps-pill px-2.5 py-1 text-[11px] font-medium rounded-lg bg-white/80 text-slate-700 hover:bg-white">Không GPS</button>
         <button data-gps="selected" type="button" class="gps-pill px-2.5 py-1 text-[11px] font-medium rounded-lg bg-white/80 text-slate-700 hover:bg-white">Đã chọn</button>
+        <button data-gps="has_ocr" type="button" class="gps-pill px-2.5 py-1 text-[11px] font-medium rounded-lg bg-white/80 text-slate-700 hover:bg-white">Có chữ OCR</button>
       </div>
 
       <div class="grid grid-cols-2 gap-1.5">
@@ -370,6 +392,15 @@
         </div>
         <div class="md:col-span-6 p-5 flex flex-col justify-between gap-4">
           <div id="detailMetaList" class="space-y-2 text-xs"></div>
+          <div id="detailOcrBox" class="mt-2 bg-slate-50 border border-slate-200 rounded-xl p-3">
+            <div class="flex items-center justify-between gap-2 mb-1.5">
+              <span class="text-[11px] font-semibold text-slate-700 flex items-center gap-1">
+                <i data-lucide="scan-text" class="w-3.5 h-3.5 text-emerald-600"></i> Văn bản OCR trong ảnh
+              </span>
+              <button id="btnDetailCopyOcr" type="button" class="text-[11px] font-medium text-emerald-700 hover:text-emerald-800">Copy chữ</button>
+            </div>
+            <p id="detailOcrText" class="text-[11px] text-slate-700 whitespace-pre-wrap leading-relaxed max-h-24 overflow-y-auto custom-scroll"></p>
+          </div>
           <div class="flex flex-wrap gap-2 pt-3 border-t border-slate-100">
             <button id="btnDetailFlyTo" type="button" class="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 text-xs font-semibold rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white transition">
               <i data-lucide="compass" class="w-4 h-4"></i> Bay tới vị trí
@@ -432,6 +463,8 @@
         focalLength: '35 mm',
         fNumber: 'f/2.8',
         iso: 200,
+        ocrText: 'Hồ Hoàn Kiếm — Tháp Rùa Hà Nội · Hoàng hôn mùa thu',
+        ocrStatus: 'cached',
         isSample: true
       },
       {
@@ -449,6 +482,8 @@
         focalLength: '17 mm',
         fNumber: 'f/4.0',
         iso: 100,
+        ocrText: 'Phố đi bộ Hồ Gươm · Đinh Tiên Hoàng, Hoàn Kiếm',
+        ocrStatus: 'cached',
         isSample: true
       },
       {
@@ -466,6 +501,8 @@
         focalLength: '24 mm',
         fNumber: 'f/4.0',
         iso: 800,
+        ocrText: 'Cầu Rồng Sông Hàn — Thành phố Đà Nẵng',
+        ocrStatus: 'cached',
         isSample: true
       },
       {
@@ -483,6 +520,8 @@
         focalLength: '24 mm',
         fNumber: 'f/1.8',
         iso: 64,
+        ocrText: 'Bến Bạch Đằng · Sông Sài Gòn Quận 1 TP.HCM',
+        ocrStatus: 'cached',
         isSample: true
       },
       {
@@ -500,6 +539,8 @@
         focalLength: '24 mm',
         fNumber: 'f/1.8',
         iso: 80,
+        ocrText: 'Nhà thờ Đức Bà Sài Gòn · Công trường Công xã Paris',
+        ocrStatus: 'cached',
         isSample: true
       }
     ];
@@ -755,6 +796,8 @@
           focalLength: meta.focalLength ?? null,
           fNumber: meta.fNumber ?? null,
           iso: meta.iso ?? null,
+          ocrText: null,
+          ocrStatus: 'pending',
           isSample: false
         };
 
@@ -818,17 +861,27 @@
     // =========================================================================
     // 5. Filtering, Sorting & GeoJSON Building
     // =========================================================================
+    function normalizeVi(str) {
+      return String(str || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd');
+    }
+
     function getFilteredPhotos() {
-      const q = state.filters.query.trim().toLowerCase();
+      const q = normalizeVi(state.filters.query.trim());
       return state.photos
         .filter((p) => {
           const hasGps = p.lat !== null && p.lon !== null;
+          const hasOcr = Boolean(p.ocrText && p.ocrText.trim().length > 0);
           if (state.filters.gps === 'with_gps' && !hasGps) return false;
           if (state.filters.gps === 'no_gps' && hasGps) return false;
           if (state.filters.gps === 'selected' && !state.selectedIds.has(p.id)) return false;
+          if (state.filters.gps === 'has_ocr' && !hasOcr) return false;
           if (state.filters.camera !== 'all' && (p.cameraModel || 'Không rõ') !== state.filters.camera) return false;
           if (q) {
-            const hay = `${p.filename} ${p.path} ${p.cameraMake || ''} ${p.cameraModel || ''}`.toLowerCase();
+            const hay = normalizeVi(`${p.filename} ${p.path} ${p.cameraMake || ''} ${p.cameraModel || ''} ${p.ocrText || ''}`);
             if (!hay.includes(q)) return false;
           }
           return true;
@@ -866,6 +919,7 @@
           if (p.focalLength) props.focal_length = p.focalLength;
           if (p.fNumber) props.aperture = p.fNumber;
           if (p.iso) props.iso = p.iso;
+          if (p.ocrText) props.ocr_text = p.ocrText;
           return {
             type: 'Feature',
             geometry: { type: 'Point', coordinates: coords },
@@ -1128,6 +1182,7 @@
               <div class="p-2">
                 <p class="text-[11px] font-semibold text-slate-900 truncate" title="${escapeAttr(p.filename)}">${escapeHtml(p.filename)}</p>
                 <p class="text-[10px] text-slate-500 truncate mt-0.5">${escapeHtml(p.cameraModel || 'Không rõ')}</p>
+                ${p.ocrText ? `<p class="text-[10px] text-emerald-700 bg-emerald-50 rounded px-1.5 py-0.5 mt-1 truncate" title="${escapeAttr(p.ocrText)}">OCR: ${escapeHtml(p.ocrText)}</p>` : ''}
               </div>
             </article>
           `;
@@ -1200,6 +1255,18 @@
       btnCopy.disabled = !hasGps;
       btnFly.classList.toggle('opacity-40', !hasGps);
       btnCopy.classList.toggle('opacity-40', !hasGps);
+
+      const ocrEl = document.getElementById('detailOcrText');
+      const copyOcrBtn = document.getElementById('btnDetailCopyOcr');
+      if (p.ocrText && p.ocrText.trim()) {
+        ocrEl.textContent = p.ocrText;
+        ocrEl.classList.remove('italic', 'text-slate-400');
+        copyOcrBtn.classList.remove('hidden');
+      } else {
+        ocrEl.textContent = 'Chưa có văn bản OCR (chạy Quét OCR trên Rust local server để nhận diện chữ trong ảnh).';
+        ocrEl.classList.add('italic', 'text-slate-400');
+        copyOcrBtn.classList.add('hidden');
+      }
 
       document.getElementById('detailModal').classList.remove('hidden');
       if (window.lucide) lucide.createIcons();
@@ -1482,6 +1549,10 @@
         document.getElementById('detailModal').classList.add('hidden');
         if (state.activeId) flyToPhoto(state.activeId);
       });
+      document.getElementById('btnDetailCopyOcr').addEventListener('click', () => {
+        const p = state.photos.find((item) => item.id === state.activeId);
+        if (p && p.ocrText) copyText(p.ocrText, 'Đã sao chép văn bản OCR.');
+      });
       document.getElementById('btnDetailCopyCoord').addEventListener('click', () => {
         const p = state.photos.find((item) => item.id === state.activeId);
         if (p && p.lat !== null && p.lon !== null) {
@@ -1511,6 +1582,96 @@
       bindEvents();
       if (window.innerWidth < 768) setDrawerOpen(false);
       loadSamplePhotos();
+    });
+
+    // =========================================================================
+    // 10. Rust Local Server Integration (Folder Scan + Background OS OCR)
+    // =========================================================================
+    let ocrPollTimer = null;
+
+    async function serverScanFolder() {
+      const folder = document.getElementById('serverFolderInput').value.trim();
+      if (!folder) {
+        showToast('Hãy nhập đường dẫn thư mục ảnh trên máy.');
+        return;
+      }
+      try {
+        const res = await fetch('/api/scan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ folder })
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          showToast(data.error || 'Không thể quét thư mục.');
+          return;
+        }
+        state.photos = data.map((p) => ({ ...p, isSample: false }));
+        state.selectedIds = new Set(state.photos.filter((p) => p.lat !== null && p.lon !== null).map((p) => p.id));
+        closeClusterBar();
+        updateCameraFilterOptions();
+        renderAll(true);
+        const cached = state.photos.filter((p) => p.ocrStatus === 'cached').length;
+        showToast(`Đã quét ${state.photos.length} ảnh (có sẵn ${cached} ảnh từ OCR cache).`);
+      } catch (_err) {
+        showToast('Không kết nối được Rust local server.');
+      }
+    }
+
+    async function serverStartOcr() {
+      if (state.photos.length === 0 || state.photos.every((p) => p.isSample)) {
+        showToast('Hãy nhập đường dẫn và bấm "Quét" thư mục trước khi chạy OCR.');
+        return;
+      }
+      try {
+        const res = await fetch('/api/ocr/start', { method: 'POST' });
+        if (!res.ok) {
+          showToast('Không thể khởi chạy OCR.');
+          return;
+        }
+        document.getElementById('ocrProgressWrap').classList.remove('hidden');
+        showToast('Đang chạy OCR hệ điều hành (tự động dùng cache nếu có)...');
+        startOcrPolling();
+      } catch (_err) {
+        showToast('Không kết nối được Rust local server.');
+      }
+    }
+
+    function startOcrPolling() {
+      clearInterval(ocrPollTimer);
+      ocrPollTimer = setInterval(async () => {
+        try {
+          const res = await fetch('/api/ocr/status');
+          if (!res.ok) return;
+          const data = await res.json();
+          const prog = data.progress;
+          const pct = prog.total > 0 ? Math.round((prog.done / prog.total) * 100) : 100;
+          document.getElementById('ocrProgressBar').style.width = `${pct}%`;
+          document.getElementById('ocrProgressCount').textContent = `${prog.done}/${prog.total}`;
+          document.getElementById('ocrProgressLabel').textContent = prog.running
+            ? `Đang quét OCR (cache: ${prog.fromCache})...`
+            : `Hoàn tất OCR (cache: ${prog.fromCache}, lỗi: ${prog.errors})`;
+
+          if (Array.isArray(data.photos) && data.photos.length > 0) {
+            state.photos = data.photos.map((p) => ({ ...p, isSample: false }));
+            renderAll(false);
+          }
+          if (!prog.running) {
+            clearInterval(ocrPollTimer);
+            showToast(`OCR hoàn tất ${prog.done}/${prog.total} ảnh (từ cache: ${prog.fromCache}).`);
+          }
+        } catch (_e) {
+          clearInterval(ocrPollTimer);
+        }
+      }, 900);
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('btnServerScan').addEventListener('click', serverScanFolder);
+      document.getElementById('btnServerOcr').addEventListener('click', serverStartOcr);
+      document.getElementById('serverFolderInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') serverScanFolder();
+      });
     });
   </script>
 </body>

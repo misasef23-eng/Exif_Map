@@ -1,11 +1,14 @@
+mod ocr;
+
 use axum::{
-    extract::{Path as AxumPath, State},
+    extract::{Path as AxumPath, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
 use exif::{Exif, In, Rational, Reader, Tag, Value};
+use ocr::{normalize_vi, OcrCache};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::{self, File};
@@ -16,6 +19,7 @@ use std::sync::{Arc, RwLock};
 use walkdir::WalkDir;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
+const OCR_CACHE_FILE: &str = ".exif_map_ocr_cache.json";
 
 const SUPPORTED_EXTS: &[&str] = &[
     "jpg", "jpeg", "tif", "tiff", "heic", "heif", "png", "webp", "avif",
@@ -24,6 +28,17 @@ const SUPPORTED_EXTS: &[&str] = &[
 #[derive(Clone, Default)]
 struct AppState {
     photos: Arc<RwLock<Vec<IndexedPhoto>>>,
+    ocr_progress: Arc<RwLock<OcrProgress>>,
+}
+
+#[derive(Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OcrProgress {
+    running: bool,
+    done: usize,
+    total: usize,
+    from_cache: usize,
+    errors: usize,
 }
 
 #[derive(Clone)]
@@ -50,11 +65,24 @@ struct PhotoRecord {
     focal_length: Option<String>,
     f_number: Option<String>,
     iso: Option<u32>,
+    ocr_text: Option<String>,
+    ocr_status: String,
 }
 
 #[derive(Deserialize)]
 struct ScanRequest {
     folder: String,
+}
+
+#[derive(Deserialize)]
+struct SearchParams {
+    q: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OcrStatusResponse {
+    progress: OcrProgress,
+    photos: Vec<PhotoRecord>,
 }
 
 #[derive(Serialize)]
@@ -92,28 +120,29 @@ struct Properties {
     camera_model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     altitude: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ocr_text: Option<String>,
 }
 
 #[tokio::main]
 async fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Chế độ CLI nếu truyền đối số đường dẫn (không bắt đầu bằng --serve)
     if args.len() >= 2 && args[1] != "--serve" && args[1] != "-s" {
         if args[1] == "-h" || args[1] == "--help" {
-            eprintln!("Exif_Map — Quản lý ảnh EXIF & xuất GeoJSON (chỉ đọc)");
+            eprintln!("Exif_Map — Quản lý ảnh EXIF, OCR gốc hệ điều hành & xuất GeoJSON (chỉ đọc)");
             eprintln!("  Chế độ Web UI: {} [--serve [port]]", args[0]);
-            eprintln!("  Chế độ CLI:    {} <file_hoac_thu_muc> [output.geojson]", args[0]);
+            eprintln!(
+                "  Chế độ CLI:    {} <file_hoac_thu_muc> [output.geojson] [--ocr \"tu khoa\"]",
+                args[0]
+            );
             process::exit(0);
         }
-        run_cli(&args[1], args.get(2).map(String::as_str));
+        run_cli(&args[1..]);
         return;
     }
 
-    let port: u16 = args
-        .get(2)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3030);
+    let port: u16 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(3030);
 
     let state = AppState::default();
     let app = Router::new()
@@ -121,6 +150,9 @@ async fn main() {
         .route("/api/scan", post(api_scan_folder))
         .route("/api/photos", get(api_list_photos))
         .route("/api/photo/{id}", get(api_serve_photo))
+        .route("/api/ocr/start", post(api_start_ocr))
+        .route("/api/ocr/status", get(api_ocr_status))
+        .route("/api/search", get(api_search_photos))
         .route("/api/geojson", get(api_geojson))
         .with_state(state);
 
@@ -129,7 +161,8 @@ async fn main() {
         .await
         .expect("Không thể mở cổng local server");
 
-    eprintln!("Exif_Map Web UI đang chạy (chỉ đọc) tại: http://{addr}");
+    eprintln!("Exif_Map Web UI (EXIF + OCR chỉ đọc) đang chạy tại: http://{addr}");
+    eprintln!("Cache OCR lưu tại: {OCR_CACHE_FILE}");
     eprintln!("Nhấn Ctrl+C để dừng server.");
 
     axum::serve(listener, app)
@@ -154,12 +187,21 @@ async fn api_scan_folder(
             .into_response();
     }
 
+    let cache = OcrCache::load(Path::new(OCR_CACHE_FILE));
     let paths = collect_image_paths(&input);
     let mut indexed = Vec::with_capacity(paths.len());
 
     for (idx, path) in paths.into_iter().enumerate() {
         let id = format!("local-{idx}");
-        let record = read_photo_record(&id, &path);
+        let mut record = read_photo_record(&id, &path);
+        if let Some(cached_text) = cache.get_valid(&path) {
+            record.ocr_text = if cached_text.is_empty() {
+                None
+            } else {
+                Some(cached_text)
+            };
+            record.ocr_status = "cached".to_string();
+        }
         indexed.push(IndexedPhoto {
             id,
             disk_path: path,
@@ -171,8 +213,162 @@ async fn api_scan_folder(
     if let Ok(mut guard) = state.photos.write() {
         *guard = indexed;
     }
+    if let Ok(mut prog) = state.ocr_progress.write() {
+        let cached_count = records.iter().filter(|r| r.ocr_status == "cached").count();
+        *prog = OcrProgress {
+            running: false,
+            done: cached_count,
+            total: records.len(),
+            from_cache: cached_count,
+            errors: 0,
+        };
+    }
 
     Json(records).into_response()
+}
+
+async fn api_start_ocr(State(state): State<AppState>) -> impl IntoResponse {
+    {
+        if let Ok(prog) = state.ocr_progress.read() {
+            if prog.running {
+                return (StatusCode::ACCEPTED, Json(prog.clone())).into_response();
+            }
+        }
+    }
+
+    let jobs: Vec<(String, PathBuf)> = state
+        .photos
+        .read()
+        .map(|g| {
+            g.iter()
+                .map(|p| (p.id.clone(), p.disk_path.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let total = jobs.len();
+    if let Ok(mut prog) = state.ocr_progress.write() {
+        *prog = OcrProgress {
+            running: total > 0,
+            done: 0,
+            total,
+            from_cache: 0,
+            errors: 0,
+        };
+    }
+
+    if total == 0 {
+        return (StatusCode::OK, Json(OcrProgress::default())).into_response();
+    }
+
+    let bg_state = state.clone();
+    tokio::task::spawn_blocking(move || {
+        let cache_path = Path::new(OCR_CACHE_FILE);
+        let mut cache = OcrCache::load(cache_path);
+        let mut cache_dirty = false;
+
+        for (id, path) in jobs {
+            let (text_opt, status, hit_cache, had_error) = if let Some(cached) = cache.get_valid(&path) {
+                (
+                    if cached.is_empty() { None } else { Some(cached) },
+                    "cached".to_string(),
+                    true,
+                    false,
+                )
+            } else {
+                match ocr::recognize_text(&path) {
+                    Ok(text) => {
+                        cache.insert(&path, text.clone());
+                        cache_dirty = true;
+                        (
+                            if text.is_empty() { None } else { Some(text) },
+                            "done".to_string(),
+                            false,
+                            false,
+                        )
+                    }
+                    Err(_) => (None, "error".to_string(), false, true),
+                }
+            };
+
+            if let Ok(mut photos) = bg_state.photos.write() {
+                if let Some(item) = photos.iter_mut().find(|p| p.id == id) {
+                    item.record.ocr_text = text_opt;
+                    item.record.ocr_status = status;
+                }
+            }
+
+            if let Ok(mut prog) = bg_state.ocr_progress.write() {
+                prog.done += 1;
+                if hit_cache {
+                    prog.from_cache += 1;
+                }
+                if had_error {
+                    prog.errors += 1;
+                }
+            }
+        }
+
+        if cache_dirty {
+            let _ = cache.save(cache_path);
+        }
+
+        if let Ok(mut prog) = bg_state.ocr_progress.write() {
+            prog.running = false;
+        }
+    });
+
+    let current = state
+        .ocr_progress
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    (StatusCode::ACCEPTED, Json(current)).into_response()
+}
+
+async fn api_ocr_status(State(state): State<AppState>) -> impl IntoResponse {
+    let progress = state
+        .ocr_progress
+        .read()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let photos = state
+        .photos
+        .read()
+        .map(|g| g.iter().map(|p| p.record.clone()).collect())
+        .unwrap_or_default();
+    Json(OcrStatusResponse { progress, photos })
+}
+
+async fn api_search_photos(
+    State(state): State<AppState>,
+    Query(params): Query<SearchParams>,
+) -> impl IntoResponse {
+    let needle = normalize_vi(params.q.as_deref().unwrap_or("").trim());
+    let records: Vec<PhotoRecord> = state
+        .photos
+        .read()
+        .map(|g| {
+            g.iter()
+                .map(|p| p.record.clone())
+                .filter(|r| {
+                    if needle.is_empty() {
+                        return true;
+                    }
+                    let hay = format!(
+                        "{} {} {} {} {}",
+                        r.filename,
+                        r.path,
+                        r.camera_make.as_deref().unwrap_or(""),
+                        r.camera_model.as_deref().unwrap_or(""),
+                        r.ocr_text.as_deref().unwrap_or("")
+                    );
+                    normalize_vi(&hay).contains(&needle)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Json(records)
 }
 
 async fn api_list_photos(State(state): State<AppState>) -> impl IntoResponse {
@@ -223,12 +419,34 @@ async fn api_geojson(State(state): State<AppState>) -> impl IntoResponse {
     })
 }
 
-fn run_cli(input_arg: &str, output_arg: Option<&str>) {
+fn run_cli(cli_args: &[String]) {
+    let input_arg = &cli_args[0];
+    let mut output_arg: Option<&str> = None;
+    let mut ocr_query: Option<String> = None;
+
+    let mut i = 1;
+    while i < cli_args.len() {
+        if cli_args[i] == "--ocr" && i + 1 < cli_args.len() {
+            ocr_query = Some(cli_args[i + 1].clone());
+            i += 2;
+        } else if output_arg.is_none() && !cli_args[i].starts_with("--") {
+            output_arg = Some(cli_args[i].as_str());
+            i += 1;
+        } else {
+            i += 1;
+        }
+    }
+
     let input_path = Path::new(input_arg);
     if !input_path.exists() {
         eprintln!("Lỗi: Không tìm thấy đường dẫn '{}'", input_path.display());
         process::exit(1);
     }
+
+    let cache_path = Path::new(OCR_CACHE_FILE);
+    let mut cache = OcrCache::load(cache_path);
+    let mut cache_dirty = false;
+    let needle = ocr_query.as_deref().map(normalize_vi);
 
     let image_paths = collect_image_paths(input_path);
     let total_files = image_paths.len();
@@ -236,11 +454,36 @@ fn run_cli(input_arg: &str, output_arg: Option<&str>) {
     let mut skipped = 0usize;
 
     for (idx, path) in image_paths.iter().enumerate() {
-        let rec = read_photo_record(&format!("cli-{idx}"), path);
+        let mut rec = read_photo_record(&format!("cli-{idx}"), path);
+
+        if let Some(ref q) = needle {
+            let text = if let Some(cached) = cache.get_valid(path) {
+                cached
+            } else {
+                match ocr::recognize_text(path) {
+                    Ok(t) => {
+                        cache.insert(path, t.clone());
+                        cache_dirty = true;
+                        t
+                    }
+                    Err(_) => String::new(),
+                }
+            };
+            if !normalize_vi(&text).contains(q) {
+                skipped += 1;
+                continue;
+            }
+            rec.ocr_text = if text.is_empty() { None } else { Some(text) };
+        }
+
         match record_to_feature(&rec) {
             Some(f) => features.push(f),
             None => skipped += 1,
         }
+    }
+
+    if cache_dirty {
+        let _ = cache.save(cache_path);
     }
 
     let collection = FeatureCollection {
@@ -252,7 +495,7 @@ fn run_cli(input_arg: &str, output_arg: Option<&str>) {
     if let Some(output_path) = output_arg {
         fs::write(output_path, &json).expect("Lỗi ghi tệp GeoJSON");
         eprintln!(
-            "Đã xuất {} điểm GPS vào '{}' (quét {} ảnh, bỏ qua {} ảnh không có GPS).",
+            "Đã xuất {} điểm GPS vào '{}' (quét {} ảnh, bỏ qua {} ảnh).",
             collection.features.len(),
             output_path,
             total_files,
@@ -261,7 +504,7 @@ fn run_cli(input_arg: &str, output_arg: Option<&str>) {
     } else {
         println!("{json}");
         eprintln!(
-            "Đã xuất {} điểm GPS (quét {} ảnh, bỏ qua {} ảnh không có GPS).",
+            "Đã xuất {} điểm GPS (quét {} ảnh, bỏ qua {} ảnh).",
             collection.features.len(),
             total_files,
             skipped
@@ -288,6 +531,7 @@ fn record_to_feature(rec: &PhotoRecord) -> Option<Feature> {
             camera_make: rec.camera_make.clone(),
             camera_model: rec.camera_model.clone(),
             altitude: rec.altitude,
+            ocr_text: rec.ocr_text.clone(),
         },
     })
 }
@@ -351,6 +595,8 @@ fn read_photo_record(id: &str, path: &Path) -> PhotoRecord {
         focal_length: None,
         f_number: None,
         iso: None,
+        ocr_text: None,
+        ocr_status: "pending".to_string(),
     };
 
     let Ok(file) = File::open(path) else {

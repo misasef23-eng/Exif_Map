@@ -1,8 +1,8 @@
 [package]
 name = "Exif_Map"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
-description = "Rust local server + Web UI (chỉ đọc) quản lý ảnh EXIF, trích xuất GPS và xuất GeoJSON"
+description = "Rust local server + Web UI (chỉ đọc) quản lý ảnh EXIF, OCR gốc hệ điều hành có cache và xuất GeoJSON"
 
 [dependencies]
 axum = "0.8"
