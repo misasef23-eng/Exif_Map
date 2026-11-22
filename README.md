@@ -37,8 +37,8 @@ Exif_Map/
 ├── src/
 │   ├── main.rs       # Máy chủ cục bộ Axum (chỉ đọc), API OCR nền + chế độ CLI
 │   └── ocr.rs        # Module OCR gốc hệ điều hành (macOS/Windows/Linux) + JSON cache
-└── web/
-    └── empty
+└── ex/
+    └── I love Ngan Anh
 ```
 
 ## Cài đặt & Cách chạy
