@@ -38,7 +38,7 @@ Exif_Map/
 │   ├── main.rs       # Máy chủ cục bộ Axum (chỉ đọc), API OCR nền + chế độ CLI
 │   └── ocr.rs        # Module OCR gốc hệ điều hành (macOS/Windows/Linux) + JSON cache
 └── web/
-    └── index.html    # Giao diện Web UI (nhúng trực tiếp vào binary bằng include_str!)
+    └── empty
 ```
 
 ## Cài đặt & Cách chạy
