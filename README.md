@@ -152,3 +152,9 @@ Khi chạy ở chế độ máy chủ cục bộ (`127.0.0.1:3030`), `Exif_Map` 
 * **An toàn dữ liệu:** Ứng dụng hoạt động hoàn toàn ở chế độ chỉ đọc; nút **Xóa DS** chỉ làm trống danh sách hiển thị trong phiên hiện tại, không tác động tới tệp gốc.
 * **Ảnh bị mất EXIF:** Các ảnh gửi qua Zalo, Messenger, Facebook hoặc ứng dụng nhắn tin thường bị nén và xóa sạch EXIF nên sẽ hiển thị ở mục **Không GPS**.
 * **Thứ tự tọa độ:** Chuẩn GeoJSON (RFC 7946) luôn đặt `[longitude, latitude]` (kinh độ trước, vĩ độ sau), ngược lại với thứ tự `(latitude, longitude)` thường thấy khi tìm trên Google Maps.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+You are free to use, copy, modify, distribute, and sublicense this software in accordance with the terms of the MIT License.
