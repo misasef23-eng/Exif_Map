@@ -1,11 +1,13 @@
 [package]
 name = "Exif_Map"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Đọc EXIF metadata của ảnh, trích xuất tọa độ GPS và xuất GeoJSON để hiển thị trên bản đồ"
+description = "Rust local server + Web UI (chỉ đọc) quản lý ảnh EXIF, trích xuất GPS và xuất GeoJSON"
 
 [dependencies]
+axum = "0.8"
 kamadak-exif = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
 walkdir = "2"
