@@ -1,0 +1,11 @@
+[package]
+name = "Exif_Map"
+version = "0.1.0"
+edition = "2021"
+description = "Đọc EXIF metadata của ảnh, trích xuất tọa độ GPS và xuất GeoJSON để hiển thị trên bản đồ"
+
+[dependencies]
+kamadak-exif = "0.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
