@@ -2,6 +2,8 @@
 
 Ứng dụng **Rust local server ([`axum`](https://docs.rs/axum/latest/axum/)) + Web UI bản đồ tràn viền** giúp quản lý thư viện ảnh EXIF theo chế độ **chỉ đọc**, tự động gom cụm ảnh theo tọa độ GPS kiểu Apple Photos và xuất dữ liệu **GeoJSON (RFC 7946)**.
 
+![Giao diện bản đồ Exif_Map](assets/demo.jpg)
+
 ## Tính năng chính
 
 * **Bản đồ tràn viền kiểu Apple Photos:** Hiển thị ảnh dưới dạng ghim vuông bo góc viền trắng có mũi nhọn; các ảnh gần nhau tự động gom cụm kèm bộ đếm số lượng ảnh và tách cụm mượt mà khi phóng to.
@@ -23,6 +25,8 @@
 Exif_Map/
 ├── Cargo.toml        # Khai báo package Exif_Map và các crate phụ thuộc
 ├── README.md         # Tài liệu hướng dẫn chi tiết
+├── assets/
+│   └── demo.jpg      # Ảnh minh họa giao diện bản đồ Exif_Map
 ├── src/
 │   └── main.rs       # Máy chủ cục bộ Axum (chỉ đọc) + chế độ CLI
 └── web/
