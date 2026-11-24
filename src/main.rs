@@ -1,4 +1,5 @@
 mod ocr;
+mod writer;
 
 use axum::{
     extract::{Path as AxumPath, Query, State},
@@ -9,17 +10,20 @@ use axum::{
 };
 use exif::{Exif, In, Rational, Reader, Tag, Value};
 use ocr::{normalize_vi, OcrCache};
+use writer::{strip_metadata_copy, write_metadata_copy, MetadataPatch};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use walkdir::WalkDir;
 
 const INDEX_HTML: &str = include_str!("../web/index.html");
 const OCR_CACHE_FILE: &str = ".exif_map_ocr_cache.json";
+static COPY_SEQ: AtomicU64 = AtomicU64::new(1);
 
 const SUPPORTED_EXTS: &[&str] = &[
     "jpg", "jpeg", "tif", "tiff", "heic", "heif", "png", "webp", "avif",
@@ -150,6 +154,10 @@ async fn main() {
         .route("/api/scan", post(api_scan_folder))
         .route("/api/photos", get(api_list_photos))
         .route("/api/photo/{id}", get(api_serve_photo))
+        .route("/api/photo/{id}/metadata", post(api_write_metadata_copy))
+        .route("/api/photo/{id}/strip", post(api_strip_metadata_copy))
+        .route("/api/photos/strip-batch", post(api_strip_metadata_batch))
+        .route("/api/photo/{id}/download", get(api_download_photo))
         .route("/api/ocr/start", post(api_start_ocr))
         .route("/api/ocr/status", get(api_ocr_status))
         .route("/api/search", get(api_search_photos))
@@ -400,6 +408,274 @@ async fn api_serve_photo(
 
     let mime = guess_mime(&path);
     ([(header::CONTENT_TYPE, mime)], bytes).into_response()
+}
+
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteMetadataResponse {
+    saved_path: String,
+    download_url: String,
+    photo: PhotoRecord,
+}
+
+async fn api_write_metadata_copy(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    Json(patch): Json<MetadataPatch>,
+) -> impl IntoResponse {
+    let src_path = state
+        .photos
+        .read()
+        .ok()
+        .and_then(|g| g.iter().find(|p| p.id == id).map(|p| p.disk_path.clone()));
+
+    let Some(src_path) = src_path else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Không tìm thấy ảnh trong phiên hiện tại." })),
+        )
+            .into_response();
+    };
+
+    let dst_path = match write_metadata_copy(&src_path, &patch) {
+        Ok(p) => p,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err })),
+            )
+                .into_response();
+        }
+    };
+
+    let new_id = format!(
+        "edited-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0)
+    );
+    let record = read_photo_record(&new_id, &dst_path);
+    let saved_path = dst_path.to_string_lossy().into_owned();
+    let download_url = format!("/api/photo/{new_id}/download");
+
+    if let Ok(mut guard) = state.photos.write() {
+        guard.push(IndexedPhoto {
+            id: new_id,
+            disk_path: dst_path,
+            record: record.clone(),
+        });
+    }
+
+    Json(WriteMetadataResponse {
+        saved_path,
+        download_url,
+        photo: record,
+    })
+    .into_response()
+}
+
+#[derive(Deserialize)]
+struct StripBatchRequest {
+    ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StripBatchItem {
+    source_id: String,
+    saved_path: String,
+    download_url: String,
+    photo: PhotoRecord,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StripBatchError {
+    source_id: String,
+    error: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StripBatchResponse {
+    count: usize,
+    failed: usize,
+    items: Vec<StripBatchItem>,
+    errors: Vec<StripBatchError>,
+}
+
+fn next_unique_id(prefix: &str) -> String {
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let seq = COPY_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{prefix}-{ms}-{seq}")
+}
+
+async fn api_strip_metadata_copy(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let src_path = state
+        .photos
+        .read()
+        .ok()
+        .and_then(|g| g.iter().find(|p| p.id == id).map(|p| p.disk_path.clone()));
+
+    let Some(src_path) = src_path else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Không tìm thấy ảnh trong phiên hiện tại." })),
+        )
+            .into_response();
+    };
+
+    let dst_path = match strip_metadata_copy(&src_path) {
+        Ok(p) => p,
+        Err(err) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": err })),
+            )
+                .into_response();
+        }
+    };
+
+    let new_id = next_unique_id("clean");
+    let record = read_photo_record(&new_id, &dst_path);
+    let saved_path = dst_path.to_string_lossy().into_owned();
+    let download_url = format!("/api/photo/{new_id}/download");
+
+    if let Ok(mut guard) = state.photos.write() {
+        guard.push(IndexedPhoto {
+            id: new_id,
+            disk_path: dst_path,
+            record: record.clone(),
+        });
+    }
+
+    Json(WriteMetadataResponse {
+        saved_path,
+        download_url,
+        photo: record,
+    })
+    .into_response()
+}
+
+async fn api_strip_metadata_batch(
+    State(state): State<AppState>,
+    Json(payload): Json<StripBatchRequest>,
+) -> impl IntoResponse {
+    if payload.ids.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Chưa chọn ảnh nào để xóa EXIF." })),
+        )
+            .into_response();
+    }
+
+    let targets: Vec<(String, Option<PathBuf>)> = state
+        .photos
+        .read()
+        .map(|g| {
+            payload
+                .ids
+                .iter()
+                .map(|id| {
+                    let found = g.iter().find(|p| &p.id == id).map(|p| p.disk_path.clone());
+                    (id.clone(), found)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut items = Vec::new();
+    let mut errors = Vec::new();
+    let mut new_indexed = Vec::new();
+
+    for (source_id, path_opt) in targets {
+        let Some(src_path) = path_opt else {
+            errors.push(StripBatchError {
+                source_id,
+                error: "Không tìm thấy ảnh trong phiên hiện tại.".to_string(),
+            });
+            continue;
+        };
+
+        match strip_metadata_copy(&src_path) {
+            Ok(dst_path) => {
+                let new_id = next_unique_id("clean");
+                let record = read_photo_record(&new_id, &dst_path);
+                let saved_path = dst_path.to_string_lossy().into_owned();
+                let download_url = format!("/api/photo/{new_id}/download");
+
+                new_indexed.push(IndexedPhoto {
+                    id: new_id,
+                    disk_path: dst_path,
+                    record: record.clone(),
+                });
+                items.push(StripBatchItem {
+                    source_id,
+                    saved_path,
+                    download_url,
+                    photo: record,
+                });
+            }
+            Err(err) => {
+                errors.push(StripBatchError {
+                    source_id,
+                    error: err,
+                });
+            }
+        }
+    }
+
+    if !new_indexed.is_empty() {
+        if let Ok(mut guard) = state.photos.write() {
+            guard.extend(new_indexed);
+        }
+    }
+
+    Json(StripBatchResponse {
+        count: items.len(),
+        failed: errors.len(),
+        items,
+        errors,
+    })
+    .into_response()
+}
+
+async fn api_download_photo(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let found = state.photos.read().ok().and_then(|g| {
+        g.iter()
+            .find(|p| p.id == id)
+            .map(|p| (p.disk_path.clone(), p.record.filename.clone()))
+    });
+
+    let Some((path, filename)) = found else {
+        return (StatusCode::NOT_FOUND, "Not Found").into_response();
+    };
+
+    let Ok(bytes) = fs::read(&path) else {
+        return (StatusCode::INTERNAL_SERVER_ERROR, "Không thể đọc tệp ảnh").into_response();
+    };
+
+    let mime = guess_mime(&path);
+    let disp = format!("attachment; filename="{}"", filename.replace('"', ""));
+    (
+        [
+            (header::CONTENT_TYPE, mime.to_string()),
+            (header::CONTENT_DISPOSITION, disp),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 async fn api_geojson(State(state): State<AppState>) -> impl IntoResponse {

@@ -1,12 +1,13 @@
 [package]
 name = "Exif_Map"
-version = "0.3.0"
+version = "0.5.0"
 edition = "2021"
-description = "Rust local server + Web UI (chỉ đọc) quản lý ảnh EXIF, OCR gốc hệ điều hành có cache và xuất GeoJSON"
+description = "Rust local server + Web UI quản lý ảnh EXIF, OCR gốc hệ điều hành có cache, sửa/xóa sạch EXIF xuất bản sao bằng little_exif và xuất GeoJSON"
 
 [dependencies]
 axum = "0.8"
 kamadak-exif = "0.6"
+little_exif = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
