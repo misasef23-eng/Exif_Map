@@ -2,7 +2,8 @@ mod ocr;
 mod writer;
 
 use axum::{
-    extract::{Path as AxumPath, Query, State},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Path as AxumPath, Query, State},
     http::{header, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
@@ -10,7 +11,7 @@ use axum::{
 };
 use exif::{Exif, In, Rational, Reader, Tag, Value};
 use ocr::{normalize_vi, OcrCache};
-use writer::{strip_metadata_copy, write_metadata_copy, MetadataPatch};
+use writer::{copy_file_to_clipboard, strip_metadata_copy, write_metadata_copy, MetadataPatch};
 use serde::{Deserialize, Serialize};
 use std::env;
 use std::fs::{self, File};
@@ -158,6 +159,11 @@ async fn main() {
         .route("/api/photo/{id}/strip", post(api_strip_metadata_copy))
         .route("/api/photos/strip-batch", post(api_strip_metadata_batch))
         .route("/api/photo/{id}/download", get(api_download_photo))
+        .route("/api/photo/{id}/copy-clipboard", post(api_copy_photo_to_clipboard))
+        .route(
+            "/api/clipboard/copy-file",
+            post(api_copy_uploaded_to_clipboard).layer(DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/api/ocr/start", post(api_start_ocr))
         .route("/api/ocr/status", get(api_ocr_status))
         .route("/api/search", get(api_search_photos))
@@ -449,13 +455,7 @@ async fn api_write_metadata_copy(
         }
     };
 
-    let new_id = format!(
-        "edited-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0)
-    );
+    let new_id = next_unique_id("edited");
     let record = read_photo_record(&new_id, &dst_path);
     let saved_path = dst_path.to_string_lossy().into_owned();
     let download_url = format!("/api/photo/{new_id}/download");
@@ -518,6 +518,7 @@ fn next_unique_id(prefix: &str) -> String {
 async fn api_strip_metadata_copy(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    Query(params): Query<ClipboardCopyParams>,
 ) -> impl IntoResponse {
     let src_path = state
         .photos
@@ -533,7 +534,7 @@ async fn api_strip_metadata_copy(
             .into_response();
     };
 
-    let dst_path = match strip_metadata_copy(&src_path) {
+    let dst_path = match strip_metadata_copy(&src_path, params.filename.as_deref()) {
         Ok(p) => p,
         Err(err) => {
             return (
@@ -605,7 +606,7 @@ async fn api_strip_metadata_batch(
             continue;
         };
 
-        match strip_metadata_copy(&src_path) {
+        match strip_metadata_copy(&src_path, None) {
             Ok(dst_path) => {
                 let new_id = next_unique_id("clean");
                 let record = read_photo_record(&new_id, &dst_path);
@@ -651,6 +652,7 @@ async fn api_strip_metadata_batch(
 async fn api_download_photo(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    Query(params): Query<ClipboardCopyParams>,
 ) -> impl IntoResponse {
     let found = state.photos.read().ok().and_then(|g| {
         g.iter()
@@ -667,7 +669,14 @@ async fn api_download_photo(
     };
 
     let mime = guess_mime(&path);
-    let disp = format!("attachment; filename="{}"", filename.replace('"', ""));
+    let final_name = params
+        .filename
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace(['/', '\\', '"'], "_"))
+        .unwrap_or(filename);
+    let disp = format!("attachment; filename=\"{}\"", final_name);
     (
         [
             (header::CONTENT_TYPE, mime.to_string()),
@@ -676,6 +685,107 @@ async fn api_download_photo(
         bytes,
     )
         .into_response()
+}
+
+#[derive(Deserialize)]
+struct ClipboardCopyParams {
+    filename: Option<String>,
+}
+
+async fn api_copy_photo_to_clipboard(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    let found = state.photos.read().ok().and_then(|g| {
+        g.iter()
+            .find(|p| p.id == id)
+            .map(|p| (p.disk_path.clone(), p.record.filename.clone()))
+    });
+
+    let Some((path, filename)) = found else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "Không tìm thấy ảnh trong phiên hiện tại." })),
+        )
+            .into_response();
+    };
+
+    match copy_file_to_clipboard(&path) {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "filename": filename,
+            "path": path.to_string_lossy()
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err })),
+        )
+            .into_response(),
+    }
+}
+
+async fn api_copy_uploaded_to_clipboard(
+    Query(params): Query<ClipboardCopyParams>,
+    body: Bytes,
+) -> impl IntoResponse {
+    if body.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "Dữ liệu ảnh trống." })),
+        )
+            .into_response();
+    }
+
+    let raw_name = params
+        .filename
+        .as_deref()
+        .unwrap_or("exif_map_copy.jpg");
+    let safe_name: String = Path::new(raw_name)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("exif_map_copy.jpg")
+        .chars()
+        .map(|c| {
+            if c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|' {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    let clip_dir = env::temp_dir().join("exif_map_clipboard");
+    if let Err(e) = fs::create_dir_all(&clip_dir) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Không thể tạo thư mục tạm clipboard: {e}") })),
+        )
+            .into_response();
+    }
+
+    let dst_path = clip_dir.join(&safe_name);
+    if let Err(e) = fs::write(&dst_path, &body) {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": format!("Không thể ghi tệp tạm clipboard: {e}") })),
+        )
+            .into_response();
+    }
+
+    match copy_file_to_clipboard(&dst_path) {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "filename": safe_name,
+            "path": dst_path.to_string_lossy()
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": err })),
+        )
+            .into_response(),
+    }
 }
 
 async fn api_geojson(State(state): State<AppState>) -> impl IntoResponse {

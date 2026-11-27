@@ -4,6 +4,7 @@ use little_exif::rational::uR64;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,6 +15,8 @@ pub struct MetadataPatch {
     pub datetime: Option<String>,
     pub camera_make: Option<String>,
     pub camera_model: Option<String>,
+    #[serde(default)]
+    pub output_name: Option<String>,
 }
 
 /// Tạo bản sao mới trong thư mục con `exif_map_edited/` và ghi EXIF bằng `little_exif`.
@@ -23,7 +26,7 @@ pub fn write_metadata_copy(src_path: &Path, patch: &MetadataPatch) -> Result<Pat
         return Err("Không tìm thấy tệp ảnh gốc.".to_string());
     }
 
-    let dst_path = next_copy_path_in_dir(src_path, "exif_map_edited", "exif")?;
+    let dst_path = next_copy_path_in_dir(src_path, "exif_map_edited", "exif", patch.output_name.as_deref())?;
     if let Some(parent) = dst_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Không thể tạo thư mục lưu bản sao: {e}"))?;
@@ -89,12 +92,12 @@ pub fn write_metadata_copy(src_path: &Path, patch: &MetadataPatch) -> Result<Pat
 
 /// Tạo bản sao sạch không còn EXIF/GPS/XMP/IPTC trong thư mục con `exif_map_clean/`.
 /// File gốc luôn được giữ nguyên 100%, không bao giờ bị ghi đè.
-pub fn strip_metadata_copy(src_path: &Path) -> Result<PathBuf, String> {
+pub fn strip_metadata_copy(src_path: &Path, custom_name: Option<&str>) -> Result<PathBuf, String> {
     if !src_path.exists() {
         return Err("Không tìm thấy tệp ảnh gốc.".to_string());
     }
 
-    let dst_path = next_copy_path_in_dir(src_path, "exif_map_clean", "clean")?;
+    let dst_path = next_copy_path_in_dir(src_path, "exif_map_clean", "clean", custom_name)?;
     if let Some(parent) = dst_path.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| format!("Không thể tạo thư mục lưu bản sao sạch: {e}"))?;
@@ -235,8 +238,42 @@ pub fn strip_png_metadata(bytes: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+fn sanitize_custom_stem(raw: &str, ext: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let cleaned: String = trimmed
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let lower_ext = format!(".{}", ext.to_ascii_lowercase());
+    let without_ext = if cleaned.to_ascii_lowercase().ends_with(&lower_ext) {
+        &cleaned[..cleaned.len() - lower_ext.len()]
+    } else {
+        cleaned.as_str()
+    };
+    let final_stem = without_ext.trim().trim_matches('.');
+    if final_stem.is_empty() {
+        None
+    } else {
+        Some(final_stem.to_string())
+    }
+}
+
 /// Tạo đường dẫn bản sao mới không trùng tên trong `<thu_muc_goc>/<dir_name>/`.
-fn next_copy_path_in_dir(src_path: &Path, dir_name: &str, suffix: &str) -> Result<PathBuf, String> {
+fn next_copy_path_in_dir(
+    src_path: &Path,
+    dir_name: &str,
+    suffix: &str,
+    custom_name: Option<&str>,
+) -> Result<PathBuf, String> {
     let parent = src_path.parent().unwrap_or_else(|| Path::new("."));
     let out_dir = parent.join(dir_name);
     let stem = src_path
@@ -248,10 +285,14 @@ fn next_copy_path_in_dir(src_path: &Path, dir_name: &str, suffix: &str) -> Resul
         .and_then(|e| e.to_str())
         .unwrap_or("jpg");
 
-    let mut candidate = out_dir.join(format!("{stem}_{suffix}.{ext}"));
+    let base_name = custom_name
+        .and_then(|raw| sanitize_custom_stem(raw, ext))
+        .unwrap_or_else(|| format!("{stem}_{suffix}"));
+
+    let mut candidate = out_dir.join(format!("{base_name}.{ext}"));
     let mut counter = 2u32;
     while candidate.exists() {
-        candidate = out_dir.join(format!("{stem}_{suffix}_{counter}.{ext}"));
+        candidate = out_dir.join(format!("{base_name}_{counter}.{ext}"));
         counter += 1;
     }
     Ok(candidate)
@@ -299,6 +340,82 @@ pub fn normalize_exif_datetime(raw: &str) -> Option<String> {
         _ => "00:00:00".to_string(),
     };
     Some(format!("{date} {time}"))
+}
+
+
+/// Sao chép trực tiếp tệp ảnh (giữ nguyên 100% metadata EXIF/GPS) vào clipboard hệ điều hành
+/// để người dùng có thể Cmd+V / Ctrl+V trực tiếp vào Finder, Explorer, chat hoặc app khác.
+pub fn copy_file_to_clipboard(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Err("Không tìm thấy tệp ảnh để sao chép vào clipboard.".to_string());
+    }
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+
+    #[cfg(target_os = "macos")]
+    {
+        let escaped = canonical
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        let script = format!("set the clipboard to (POSIX file \"{escaped}\")");
+        let output = Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+            .map_err(|e| format!("Không thể chạy osascript: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Lỗi sao chép clipboard macOS: {}", stderr.trim()));
+        }
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let raw = canonical.to_string_lossy();
+        let clean = raw.strip_prefix(r"\\?\").unwrap_or(&raw);
+        let escaped = clean.replace('\'', "''");
+        let ps_cmd = format!("Set-Clipboard -LiteralPath '{escaped}'");
+        let output = Command::new("powershell")
+            .args(["-NoProfile", "-STA", "-Command", &ps_cmd])
+            .output()
+            .map_err(|e| format!("Không thể chạy PowerShell Set-Clipboard: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("Lỗi sao chép clipboard Windows: {}", stderr.trim()));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        use std::io::Write;
+        use std::process::Stdio;
+        let uri = format!("file://{}\n", canonical.to_string_lossy());
+        let candidates: &[(&str, &[&str])] = &[
+            ("wl-copy", &["--type", "text/uri-list"]),
+            ("xclip", &["-selection", "clipboard", "-t", "text/uri-list"]),
+        ];
+        for (bin, args) in candidates {
+            if let Ok(mut child) = Command::new(bin)
+                .args(*args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(uri.as_bytes());
+                }
+                if let Ok(status) = child.wait() {
+                    if status.success() {
+                        return Ok(());
+                    }
+                }
+            }
+        }
+        Err("Cần cài đặt `wl-copy` (Wayland) hoặc `xclip` (X11) để sao chép tệp ảnh vào clipboard trên Linux.".to_string())
+    }
 }
 
 #[cfg(test)]
